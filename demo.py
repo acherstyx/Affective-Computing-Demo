@@ -14,6 +14,8 @@ import torch
 import torch.nn.functional as F
 import torchaudio
 import matplotlib.pyplot as plt
+import matplotlib as mpl
+import matplotlib.style as mplstyle
 
 import librosa
 import time
@@ -21,9 +23,16 @@ import time
 from mme2e.models.e2e import MME2E
 from mme2e.datasets import getEmotionDict
 
+import logging
+import warnings
+
+warnings.filterwarnings("ignore")
+
 EMOTION_DICT = {
     'ang': "Angry", 'exc': "Excited", 'fru': "Frustrated", 'hap': "Happy", 'neu': "Neutral", 'sad': "Sad"
 }
+
+logger = logging.getLogger("web_demo")
 
 
 class StreamingDemoRunner(object):
@@ -52,30 +61,55 @@ class StreamingDemoRunner(object):
         return specs
 
     @staticmethod
-    def plot_spectrogram(specgram, title=None, ylabel="freq_bin"):
-        fig, axs = plt.subplots(1, 1)
-        axs.set_title(title or "Spectrogram (db)")
-        axs.set_ylabel(ylabel)
-        axs.set_xlabel("frame")
-        im = axs.imshow(librosa.power_to_db(specgram), origin="lower", aspect="auto")
-        fig.colorbar(im, ax=axs)
-        # plt.show(block=False)
+    def plot_spectrogram(specgram):
+        mpl.rcParams['path.simplify'] = True
+        mpl.rcParams['path.simplify_threshold'] = 1.0
+        mplstyle.use('fast')
+
+        fig = plt.figure(dpi=specgram.shape[0])
+        fig.set_size_inches(4, 1, forward=False)
+        axs = plt.Axes(fig, [0., 0., 1., 1.])
+        axs.set_axis_off()
+        fig.add_axes(axs)
+        axs.imshow(librosa.power_to_db(specgram), origin="lower", aspect="auto")
         fig.canvas.draw()
         data = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
         data = data.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+        plt.clf()
+        return data
+
+    @staticmethod
+    def plot_wave(sr, waveform):
+        mpl.rcParams['path.simplify'] = True
+        mpl.rcParams['path.simplify_threshold'] = 1.0
+        mplstyle.use('fast')
+
+        num_channels, num_frames = waveform.shape
+        time_axis = torch.arange(0, num_frames) / sr
+        fig = plt.figure(dpi=150)
+        fig.set_size_inches(4, 1, forward=False)
+        axs = plt.Axes(fig, [0., 0., 1., 1.])
+        axs.set_axis_off()
+        fig.add_axes(axs)
+        axs.plot(time_axis, waveform[0], linewidth=0.5)
+        fig.canvas.draw()
+        data = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+        data = data.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+        plt.clf()
         return data
 
     @torch.no_grad()
     def run(self, image, audio):
-        time.sleep(1)
         if image is not None:
             self.image_queue.append(image)
             self.image_queue = self.image_queue[-4:]
         if audio is not None:
             sr, waveform = audio
             self.sr = sr
-            self.audio_queue = np.concatenate([self.audio_queue, waveform], axis=0) \
-                if self.audio_queue is not None else waveform
+            try:
+                self.audio_queue = np.concatenate([self.audio_queue, waveform], axis=0)
+            except ValueError:
+                self.audio_queue = waveform  # init
             self.audio_queue = self.audio_queue[-sr * 10:, ...]
 
         if len(self.image_queue) == 4 and (audio is not None or 'a' not in self.model.mod):
@@ -87,8 +121,8 @@ class StreamingDemoRunner(object):
 
             if 'a' in self.model.mod:
                 sr, waveform = self.sr, self.audio_queue
-                print(f"Audio length: {len(waveform) / sr}")
-                print(f"Sample rate: {sr}")
+                logger.debug(f"Audio length: {len(waveform) / sr}")
+                logger.debug(f"Sample rate: {sr}")
                 if len(waveform.shape) == 2:
                     waveform = waveform[:, 0]
                 waveform = torch.from_numpy(np.expand_dims(waveform, axis=0)).to(torch.float32)
@@ -104,10 +138,11 @@ class StreamingDemoRunner(object):
             pred = self.model(imgs=video_clip, imgs_lens=[4], specs=specgrams, spec_lens=spec_lens, text=None)
             pred = F.softmax(pred, dim=-1)[0].detach().cpu().numpy().tolist()
             return {EMOTION_DICT[self.label_annotations[i]]: v for i, v in enumerate(pred)}, \
-                self.plot_spectrogram(specgram[0, 0, ...]) if 'a' in self.model.mod else None
+                self.plot_spectrogram(specgram[0, 0, ...]) if 'a' in self.model.mod else None, \
+                self.plot_wave(sr, waveform) if 'a' in self.model.mod else None
         else:
-            print(f"Data not enough, skip.")
-            return {EMOTION_DICT[k]: .0 for k in self.label_annotations}, None
+            logger.warning(f"Data not enough, skip.")
+            return {EMOTION_DICT[k]: .0 for k in self.label_annotations}, None, None
 
 
 def find_checkpoint(model_path, model_name, modalities):
@@ -119,13 +154,13 @@ def find_checkpoint(model_path, model_name, modalities):
             name, mod, _, acc = model.split("_")[:4]
             model_list.append((model, name, mod, float(acc)))
         except Exception as e:
-            print(f"Cannot parse model file '{model}'")
+            logger.error(f"Cannot parse model file '{model}'")
             raise e
     model_list.sort(key=lambda x: x[-1], reverse=True)
     for model, name, mod, acc in model_list:
         if name == model_name and set(list(modalities)) == set(list(mod)):
             model_path = os.path.join(model_path, model)
-            print(f"Find trained model '{model_path}'.")
+            logger.info(f"Find trained model '{model_path}'.")
             return model_path
     raise FileNotFoundError(f"Cannot found model in {model_path}, require {model_name}_{modalities}_xxx.pt")
 
@@ -150,11 +185,12 @@ def main(args):
         fn=runner.run,
         inputs=[
             gr.Image(source="webcam", streaming=True, shape=(224, 224)),
-            gr.Audio(source="microphone", streaming=True, )
+            gr.Audio(source="microphone", streaming=True)
         ],
         outputs=[
             gr.outputs.Label(type="confidences", label="Emotion"),
-            gr.outputs.Image("numpy", label="MelSpectrogram")
+            gr.outputs.Image("numpy", label="MelSpectrogram"),
+            gr.outputs.Image("numpy", label="Waveform")
         ],
         live=True,
         allow_flagging="never",
@@ -185,5 +221,19 @@ if __name__ == '__main__':
 
     parser.add_argument('--num-emotions', help='Number of emotions in data', type=int, required=False, default=4)
     parser.add_argument('-mod', '--modalities', help='what modalities to use', type=str, required=False, default='tav')
+
+    # setup logger
+    # logging.basicConfig(level=logging.DEBUG)
+    logger.setLevel(logging.DEBUG)
+    logger.handlers.clear()
+    formatter = logging.Formatter(
+        f"[%(asctime)s][%(levelname)s] %(filename)s: %(lineno)3d: %(message)s",
+        datefmt="%m/%d %H:%M:%S",
+    )
+    handler_console = logging.StreamHandler()
+    handler_console.setLevel(logging.DEBUG)
+    handler_console.setFormatter(formatter)
+    logger.addHandler(handler_console)
+    logger.propagate = False
 
     main(parser.parse_args())
