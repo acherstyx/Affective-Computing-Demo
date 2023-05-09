@@ -96,7 +96,7 @@ class MME2E(nn.Module):
                     center = self.crop_img_center(torch.tensor(imgs[i]).permute(2, 0, 1))
                     faces[i] = center
             faces = [self.normalize(face) for face in faces]
-            faces = torch.stack(faces, dim=0).to(device=self.device)
+            faces = torch.stack(faces, dim=0).to(torch.float32).to(device=self.device)
 
             faces = self.V(faces)
 

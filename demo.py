@@ -67,6 +67,7 @@ class StreamingDemoRunner(object):
 
     @torch.no_grad()
     def run(self, image, audio):
+        time.sleep(1)
         if image is not None:
             self.image_queue.append(image)
             self.image_queue = self.image_queue[-4:]
@@ -80,7 +81,7 @@ class StreamingDemoRunner(object):
         if len(self.image_queue) == 4 and (audio is not None or 'a' not in self.model.mod):
 
             if 'v' in self.model.mod:
-                video_clip = torch.from_numpy(np.stack(self.image_queue)).to(torch.float32)  # sum(N) H W C
+                video_clip = np.stack(self.image_queue).astype(float)  # sum(N) H W C
             else:
                 video_clip = None
 
@@ -110,12 +111,22 @@ class StreamingDemoRunner(object):
 
 
 def find_checkpoint(model_path, model_name, modalities):
+    model_list = []
     for model in os.listdir(model_path):
-        if len(model.split("_")) < 2 or not model.endswith(".pt"):
-            continue
-        name, mod = model.split("_")[:2]
+        try:
+            if len(model.split("_")) < 2 or not model.endswith(".pt"):
+                continue
+            name, mod, _, acc = model.split("_")[:4]
+            model_list.append((model, name, mod, float(acc)))
+        except Exception as e:
+            print(f"Cannot parse model file '{model}'")
+            raise e
+    model_list.sort(key=lambda x: x[-1], reverse=True)
+    for model, name, mod, acc in model_list:
         if name == model_name and set(list(modalities)) == set(list(mod)):
-            return os.path.join(model_path, model)
+            model_path = os.path.join(model_path, model)
+            print(f"Find trained model '{model_path}'.")
+            return model_path
     raise FileNotFoundError(f"Cannot found model in {model_path}, require {model_name}_{modalities}_xxx.pt")
 
 
@@ -138,7 +149,7 @@ def main(args):
     demo = gr.Interface(
         fn=runner.run,
         inputs=[
-            gr.Image(source="webcam", streaming=True, shape=(360, 360)),
+            gr.Image(source="webcam", streaming=True, shape=(224, 224)),
             gr.Audio(source="microphone", streaming=True, )
         ],
         outputs=[
@@ -146,7 +157,7 @@ def main(args):
             gr.outputs.Image("numpy", label="MelSpectrogram")
         ],
         live=True,
-        allow_flagging="never"
+        allow_flagging="never",
     )
     demo.launch()
 

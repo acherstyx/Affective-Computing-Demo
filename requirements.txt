@@ -6,3 +6,4 @@ transformers~=3.4.0
 sparseconvnet @ git+https://github.com/facebookresearch/SparseConvNet.git@main
 facenet_pytorch~=2.3.0
 matplotlib
+librosa
