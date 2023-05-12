@@ -6,6 +6,7 @@
 
 
 import argparse
+import glob
 import os
 
 import gradio as gr
@@ -16,20 +17,29 @@ import torchaudio
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 import matplotlib.style as mplstyle
-
-import librosa
-import time
+import moviepy.editor
+import decord as de
+import decord.bridge
+import tempfile
 
 from mme2e.models.e2e import MME2E
 from mme2e.datasets import getEmotionDict
 
 import logging
 import warnings
+import librosa
+
+from torchvision.transforms.functional import resize, center_crop
 
 warnings.filterwarnings("ignore")
 
 EMOTION_DICT = {
-    'ang': "Angry", 'exc': "Excited", 'fru': "Frustrated", 'hap': "Happy", 'neu': "Neutral", 'sad': "Sad"
+    'ang': "😡Angry",
+    'exc': "😆Excited",
+    'fru': "😩Frustrated",
+    'hap': "😀Happy",
+    'neu': "😐Neutral",
+    'sad': "😢Sad"
 }
 
 logger = logging.getLogger("web_demo")
@@ -99,7 +109,7 @@ class StreamingDemoRunner(object):
         return data
 
     @torch.no_grad()
-    def run(self, image, audio):
+    def run_streaming(self, image, audio):
         if image is not None:
             self.image_queue.append(image)
             self.image_queue = self.image_queue[-4:]
@@ -144,6 +154,68 @@ class StreamingDemoRunner(object):
             logger.warning(f"Data not enough, skip.")
             return {EMOTION_DICT[k]: .0 for k in self.label_annotations}, None, None
 
+    @torch.no_grad()
+    def run_submission(self, video):
+        print(f"Video received: {video}")
+        if video is None:
+            return
+
+        # prepare image
+        video_clip = extract_frame(video)
+
+        # prepare audio
+        audio = moviepy.editor.VideoFileClip(video).audio
+        audio_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        audio.write_audiofile(audio_file.name)
+        waveform, sr = librosa.load(audio_file.name, sr=16000)
+        if len(waveform.shape) == 1:
+            waveform = np.expand_dims(waveform, axis=1)
+        audio = (sr, waveform)
+
+        # audio shape: [N, C]
+        if 'a' in self.model.mod:
+            sr, waveform = audio
+            logger.debug(f"Audio length: {len(waveform) / sr}")
+            logger.debug(f"Sample rate: {sr}")
+            if len(waveform.shape) == 2:
+                waveform = waveform[:, 0]
+            waveform = torch.from_numpy(np.expand_dims(waveform, axis=0)).to(torch.float32)
+
+            specgram = torchaudio.transforms.MelSpectrogram(sample_rate=sr)(waveform).unsqueeze(0)
+            specgrams = self.cutSpecToPieces(specgram)
+
+            try:
+                specgrams = torch.cat(specgrams, dim=0)
+            except RuntimeError:
+                specgrams = torch.cat(specgrams[:-1], dim=0)
+            spec_lens = [specgrams.shape[0]]
+        else:
+            specgrams = None
+            spec_lens = None
+
+        pred = self.model(imgs=video_clip, imgs_lens=[video_clip.shape[0]],
+                          specs=specgrams, spec_lens=spec_lens,
+                          text=None)
+        pred = F.softmax(pred, dim=-1)[0].detach().cpu().numpy().tolist()
+        return {EMOTION_DICT[self.label_annotations[i]]: v for i, v in enumerate(pred)}, \
+            self.plot_spectrogram(specgram[0, 0, ...]) if 'a' in self.model.mod else None, \
+            self.plot_wave(sr, waveform) if 'a' in self.model.mod else None
+
+
+def extract_frame(path):
+    decord.bridge.set_bridge("torch")
+    num = 15
+    vr = de.VideoReader(path)
+    nframes = len(vr)
+    frameDuration = nframes // num
+    indexes = range(0, nframes, int(frameDuration))
+    indexes = [i + int(frameDuration) for i in indexes if (i + int(frameDuration)) < nframes]
+    images: torch.Tensor = vr.get_batch(indexes)
+    images = images.permute(0, 3, 1, 2)  # N H W C -> N C H W
+    images = center_crop(resize(images, 224), (224, 224))
+    images = images.permute(0, 2, 3, 1)  # N C H W -> N H W C
+    return images.numpy().astype(float)
+
 
 def find_checkpoint(model_path, model_name, modalities):
     model_list = []
@@ -181,21 +253,45 @@ def main(args):
 
     runner = StreamingDemoRunner(model)
 
-    demo = gr.Interface(
-        fn=runner.run,
-        inputs=[
-            gr.Image(source="webcam", streaming=True, shape=(224, 224)),
-            gr.Audio(source="microphone", streaming=True)
-        ],
-        outputs=[
-            gr.outputs.Label(type="confidences", label="Emotion"),
-            gr.outputs.Image("numpy", label="MelSpectrogram"),
-            gr.outputs.Image("numpy", label="Waveform")
-        ],
-        live=True,
-        allow_flagging="never",
-    )
-    demo.launch()
+    with gr.Blocks() as demo:
+        gr.Markdown(
+            """
+            # Multi-modal Emotion Recognition Demo            
+            """
+        )
+        with gr.Tab("Submit"):
+            with gr.Row():
+                inputs = [gr.Video(source="upload")]
+                with gr.Column():
+                    outputs = [
+                        gr.outputs.Label(type="confidences", label="Emotion"),
+                        gr.outputs.Image("numpy", label="MelSpectrogram"),
+                        gr.outputs.Image("numpy", label="Waveform")
+                    ]
+            image_button = gr.Button("Submit")
+            image_button.click(fn=runner.run_submission, inputs=inputs, outputs=outputs)
+            gr.Examples(
+                fn=runner.run_submission,
+                examples=glob.glob("examples/*.mp4"),
+                inputs=inputs,
+                outputs=outputs
+            )
+        with gr.Tab("Real-time"):
+            with gr.Row():
+                with gr.Column():
+                    video = gr.Image(source="webcam", streaming=True, shape=(224, 224))
+                    audio = gr.Audio(source="microphone", streaming=True)
+                    inputs = [video, audio]
+                with gr.Column():
+                    outputs = [
+                        gr.outputs.Label(type="confidences", label="Emotion"),
+                        gr.outputs.Image("numpy", label="MelSpectrogram"),
+                        gr.outputs.Image("numpy", label="Waveform")
+                    ]
+            video.change(fn=runner.run_streaming,
+                         inputs=inputs, outputs=outputs, show_progress=False, queue=False)
+
+    demo.launch(server_name="0.0.0.0", share=True)
 
 
 if __name__ == '__main__':
@@ -223,7 +319,6 @@ if __name__ == '__main__':
     parser.add_argument('-mod', '--modalities', help='what modalities to use', type=str, required=False, default='tav')
 
     # setup logger
-    # logging.basicConfig(level=logging.DEBUG)
     logger.setLevel(logging.DEBUG)
     logger.handlers.clear()
     formatter = logging.Formatter(
