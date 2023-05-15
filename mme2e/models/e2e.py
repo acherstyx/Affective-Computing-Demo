@@ -83,6 +83,15 @@ class MME2E(nn.Module):
         self.weighted_fusion = nn.Linear(len(self.mod), 1, bias=False)
 
     def forward(self, imgs, imgs_lens, specs, spec_lens, text):
+        """
+
+        :param imgs: e.g. [7, C(3), H, W]
+        :param imgs_lens: e.g. [4, 3]
+        :param specs: e.g. [5, C(1), H, W]
+        :param spec_lens: e.g. [2, 3]
+        :param text:
+        :return:
+        """
         all_logits = []
 
         if 't' in self.mod:

@@ -256,7 +256,7 @@ def main(args):
     with gr.Blocks() as demo:
         gr.Markdown(
             """
-            # Multi-modal Emotion Recognition Demo            
+            # Multimodal Emotion Recognition Demo            
             """
         )
         with gr.Tab("Submit"):
