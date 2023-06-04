@@ -18,8 +18,13 @@ import matplotlib.pyplot as plt
 import matplotlib as mpl
 import matplotlib.style as mplstyle
 import moviepy.editor
-import decord as de
-import decord.bridge
+
+try:
+    import decord as de
+    import decord.bridge
+except ImportError:
+    print("Cannot import decord, trying to import cv2 as an alternative solution")
+    import cv2
 import tempfile
 
 from mme2e.models.e2e import MME2E
@@ -161,7 +166,10 @@ class StreamingDemoRunner(object):
             return
 
         # prepare image
-        video_clip = extract_frame(video)
+        try:
+            video_clip = extract_frame(video)
+        except NameError:
+            video_clip = extract_frame_cv2(video)
 
         # prepare audio
         audio = moviepy.editor.VideoFileClip(video).audio
@@ -210,11 +218,36 @@ def extract_frame(path):
     frameDuration = nframes // num
     indexes = range(0, nframes, int(frameDuration))
     indexes = [i + int(frameDuration) for i in indexes if (i + int(frameDuration)) < nframes]
-    images: torch.Tensor = vr.get_batch(indexes)
-    images = images.permute(0, 3, 1, 2)  # N H W C -> N C H W
-    images = center_crop(resize(images, 224), (224, 224))
-    images = images.permute(0, 2, 3, 1)  # N C H W -> N H W C
-    return images.numpy().astype(float)
+    frames: torch.Tensor = vr.get_batch(indexes)
+    frames = frames.permute(0, 3, 1, 2)  # N H W C -> N C H W
+    frames = center_crop(resize(frames, 224), (224, 224))
+    frames = frames.permute(0, 2, 3, 1)  # N C H W -> N H W C
+    return frames.numpy().astype(float)
+
+
+def extract_frame_cv2(path):
+    cap = cv2.VideoCapture(path)
+    assert (cap.isOpened())
+    num = 15
+    nframes = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    frameDuration = nframes // num
+    indexes = range(0, nframes, int(frameDuration))
+    frames = []
+    for index in indexes:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, index - 1)
+        ret, frame = cap.read()
+        if ret:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frame = torch.from_numpy(frame)
+            frames.append(frame)
+        else:
+            raise RuntimeError(f"Failed to read frame with idx {index} from video {path}")
+
+    frames = torch.stack(frames)
+    frames = frames.permute(0, 3, 1, 2)  # N H W C -> N C H W
+    frames = center_crop(resize(frames, 224), (224, 244))
+    frames = frames.permute(0, 2, 3, 1)  # N C H W -> N H W C
+    return frames.numpy().astype(float)
 
 
 def find_checkpoint(model_path, model_name, modalities):

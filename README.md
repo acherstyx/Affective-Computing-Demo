@@ -27,6 +27,10 @@ python3 demo.py \
   --text-model-size=base
 ```
 
-## About the implementation
+## Screenshots
+
+![Main](docs/screenshot.png)
+
+## About the Implementation
 
 The demo currently only supports the visual and audio modalities. The text modality requires ASR for generating the text, which is not included in this demo. Additionally, we have only tested the baseline MME2E model, which differs from the sparse model proposed by MME2E.
